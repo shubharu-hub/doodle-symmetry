@@ -2,7 +2,9 @@
 
 A kaleidoscope drawing toy that runs in the browser. Draw anywhere on the canvas and each stroke is repeated around the center.
 
-## Run it
+**Try it live:** https://shubharu-hub.github.io/doodle-symmetry/
+
+## Run it locally
 
 It's one HTML file with no build step and no dependencies. Open `index.html` in any modern browser.
 
