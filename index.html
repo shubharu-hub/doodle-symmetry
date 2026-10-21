@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doodle Symmetry</title>
+<style>
+  :root {
+    --bg: #12121a;
+    --panel: #1c1c28;
+    --text: #e8e8f0;
+    --muted: #8a8aa0;
+    --accent: #7c5cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid #2a2a3a;
+  }
+  h1 { font-size: 1.05rem; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  label { display: flex; align-items: center; gap: 8px; font-size: .85rem; color: var(--muted); }
+  input[type=range] { accent-color: var(--accent); width: 110px; }
+  input[type=color] { width: 34px; height: 28px; border: none; background: none; padding: 0; cursor: pointer; }
+  select, button {
+    background: #2a2a3c; color: var(--text); border: 1px solid #3a3a50;
+    border-radius: 6px; padding: 5px 10px; font-size: .85rem; cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); }
+  .spacer { flex: 1; }
+  main { flex: 1; position: relative; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  .hint { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+    font-size: .8rem; color: var(--muted); pointer-events: none; transition: opacity .6s; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Doodle Symmetry</h1>
+  <label>Slices
+    <select id="slices">
+      <option>4</option><option>6</option><option selected>8</option>
+      <option>12</option><option>16</option>
+    </select>
+  </label>
+  <label>Mirror <input type="checkbox" id="mirror" checked></label>
+  <label>Color <input type="color" id="color" value="#7c5cff"></label>
+  <label>Rainbow <input type="checkbox" id="rainbow"></label>
+  <label>Size <input type="range" id="size" min="1" max="30" value="4"></label>
+  <label>Glow <input type="checkbox" id="glow" checked></label>
+  <span class="spacer"></span>
+  <button id="undo">Undo</button>
+  <button id="clear">Clear</button>
+  <button id="save" class="primary">Download PNG</button>
+</header>
+<main>
+  <canvas id="c"></canvas>
+  <div class="hint" id="hint">Draw anywhere — your strokes are copied around the center.</div>
+</main>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const $ = id => document.getElementById(id);
+  const ui = {
+    slices: $('slices'), mirror: $('mirror'), color: $('color'), rainbow: $('rainbow'),
+    size: $('size'), glow: $('glow'),
+  };
+
+  const BG = '#0b0b12';
+  let w = 0, h = 0, dpr = 1;
+  let strokes = [];      // finished strokes, kept so we can redraw on resize/undo
+  let current = null;    // stroke in progress
+  let hue = 0;
+
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    const r = canvas.getBoundingClientRect();
+    w = r.width; h = r.height;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    redraw();
+  }
+
+  function clearCanvas() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  // Draw one segment (a -> b) with the stroke's settings, repeated around the center.
+  function drawSegment(s, a, b, color) {
+    const cx = w / 2, cy = h / 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = s.size;
+    ctx.strokeStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = s.glow ? s.size * 3 : 0;
+    ctx.globalCompositeOperation = s.glow ? 'lighter' : 'source-over';
+
+    const step = (Math.PI * 2) / s.slices;
+    for (let i = 0; i < s.slices; i++) {
+      for (const flip of s.mirror ? [1, -1] : [1]) {
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(step * i);
+        ctx.scale(1, flip);
+        ctx.beginPath();
+        ctx.moveTo(a.x - cx, a.y - cy);
+        ctx.lineTo(b.x - cx, b.y - cy);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  function drawStroke(s) {
+    if (s.points.length === 1) {
+      drawSegment(s, s.points[0], s.points[0], s.colors[0]);
+    }
+    for (let i = 1; i < s.points.length; i++) {
+      drawSegment(s, s.points[i - 1], s.points[i], s.colors[i]);
+    }
+  }
+
+  function redraw() {
+    clearCanvas();
+    strokes.forEach(drawStroke);
+  }
+
+  function pos(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function nextColor() {
+    if (ui.rainbow.checked) {
+      hue = (hue + 3) % 360;
+      return `hsl(${hue} 100% 60%)`;
+    }
+    return ui.color.value;
+  }
+
+  canvas.addEventListener('pointerdown', e => {
+    canvas.setPointerCapture(e.pointerId);
+    document.getElementById('hint').style.opacity = 0;
+    const p = pos(e);
+    const c = nextColor();
+    current = {
+      slices: +ui.slices.value, mirror: ui.mirror.checked,
+      size: +ui.size.value, glow: ui.glow.checked,
+      points: [p], colors: [c],
+    };
+    drawSegment(current, p, p, c);
+  });
+
+  canvas.addEventListener('pointermove', e => {
+    if (!current) return;
+    const p = pos(e), c = nextColor();
+    const prev = current.points[current.points.length - 1];
+    current.points.push(p);
+    current.colors.push(c);
+    drawSegment(current, prev, p, c);
+  });
+
+  function endStroke() {
+    if (!current) return;
+    strokes.push(current);
+    current = null;
+  }
+  canvas.addEventListener('pointerup', endStroke);
+  canvas.addEventListener('pointercancel', endStroke);
+
+  $('undo').onclick = () => { strokes.pop(); redraw(); };
+  $('clear').onclick = () => { strokes = []; redraw(); };
+  $('save').onclick = () => {
+    const a = document.createElement('a');
+    a.download = 'doodle-symmetry.png';
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+  };
+  window.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { strokes.pop(); redraw(); }
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+})();
+</script>
+</body>
+</html>
