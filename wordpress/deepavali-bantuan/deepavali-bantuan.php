@@ -1,0 +1,895 @@
+<?php
+/**
+ * Plugin Name: Deepavali Bantuan Collection
+ * Description: Bantuan (Deepavali goods) collection for Grand Deepavali Celebration Ampang. Station app at /bantuan/ (Excel import of recipients, person in charge (PIC) per recipient, mark collected, two-copy receipt) and two public QR forms: /bantuan/borang/ for one person collecting their own, /bantuan/pic/ for a PIC listing many names in one go. Station staff sign in with their own access code; WordPress admins get in directly.
+ * Version: 1.0.1
+ * Author: Carama Technologies Solution
+ * Requires at least: 6.4
+ * Requires PHP: 8.0
+ * License: Proprietary
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+const DVB_VERSION = '1.0.1';
+const DVB_DB      = 1;
+const DVB_SLUG    = 'bantuan';
+const DVB_NS      = 'dvb/v1';
+const DVB_COOKIE  = 'dvb_s';
+const DVB_TTL     = 2 * DAY_IN_SECONDS;
+const DVB_TZ      = 'Asia/Kuala_Lumpur';
+
+/* ---------- tables ---------- */
+
+function dvb_t( $name ) {
+	global $wpdb;
+	return $wpdb->prefix . 'dvb_' . $name;
+}
+
+function dvb_install() {
+	global $wpdb;
+	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+	$cs = $wpdb->get_charset_collate();
+	dbDelta( 'CREATE TABLE ' . dvb_t( 'recipients' ) . " (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  ic varchar(24) NOT NULL DEFAULT '',
+  name varchar(160) NOT NULL DEFAULT '',
+  phone varchar(40) NOT NULL DEFAULT '',
+  email varchar(160) NOT NULL DEFAULT '',
+  qty smallint(5) unsigned NOT NULL DEFAULT 1,
+  pic_name varchar(120) NOT NULL DEFAULT '',
+  pic_phone varchar(40) NOT NULL DEFAULT '',
+  pic_ic varchar(24) NOT NULL DEFAULT '',
+  notes varchar(500) NOT NULL DEFAULT '',
+  status varchar(12) NOT NULL DEFAULT 'pending',
+  receipt_id bigint(20) unsigned NOT NULL DEFAULT 0,
+  collected_at datetime NULL DEFAULT NULL,
+  collected_by varchar(80) NOT NULL DEFAULT '',
+  batch varchar(60) NOT NULL DEFAULT '',
+  created_at datetime NOT NULL,
+  updated_at datetime NOT NULL,
+  PRIMARY KEY  (id),
+  KEY ic (ic),
+  KEY pic_ic (pic_ic),
+  KEY status (status)
+) $cs;" );
+	dbDelta( 'CREATE TABLE ' . dvb_t( 'receipts' ) . " (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  pic_name varchar(120) NOT NULL DEFAULT '',
+  pic_phone varchar(40) NOT NULL DEFAULT '',
+  pic_ic varchar(24) NOT NULL DEFAULT '',
+  qty int(10) unsigned NOT NULL DEFAULT 0,
+  items longtext NOT NULL,
+  claim_id bigint(20) unsigned NOT NULL DEFAULT 0,
+  issued_by varchar(80) NOT NULL DEFAULT '',
+  created_at datetime NOT NULL,
+  voided_at datetime NULL DEFAULT NULL,
+  voided_by varchar(80) NOT NULL DEFAULT '',
+  void_reason varchar(300) NOT NULL DEFAULT '',
+  PRIMARY KEY  (id)
+) $cs;" );
+	dbDelta( 'CREATE TABLE ' . dvb_t( 'claims' ) . " (
+  id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  ref varchar(12) NOT NULL DEFAULT '',
+  pic_name varchar(120) NOT NULL DEFAULT '',
+  pic_phone varchar(40) NOT NULL DEFAULT '',
+  pic_ic varchar(24) NOT NULL DEFAULT '',
+  items longtext NOT NULL,
+  status varchar(12) NOT NULL DEFAULT 'new',
+  receipt_id bigint(20) unsigned NOT NULL DEFAULT 0,
+  note varchar(300) NOT NULL DEFAULT '',
+  ip varchar(64) NOT NULL DEFAULT '',
+  created_at datetime NOT NULL,
+  updated_at datetime NOT NULL,
+  PRIMARY KEY  (id),
+  KEY ref (ref),
+  KEY status (status)
+) $cs;" );
+	update_option( 'dvb_db', DVB_DB, false );
+}
+
+/* ---------- helpers ---------- */
+
+function dvb_now() {
+	return current_time( 'mysql', true ); // stored in UTC
+}
+function dvb_iso( $mysql ) {
+	return $mysql ? gmdate( 'c', strtotime( $mysql . ' UTC' ) ) : '';
+}
+function dvb_text( $v, $max = 160 ) {
+	return mb_substr( sanitize_text_field( (string) $v ), 0, $max );
+}
+/** IC / MyKad: keep letters and digits only; an 11-digit number lost its leading zero in Excel. */
+function dvb_ic( $v ) {
+	$v = strtoupper( preg_replace( '/[^0-9A-Za-z]/', '', (string) $v ) );
+	if ( preg_match( '/^\d{11}$/', $v ) ) {
+		$v = '0' . $v;
+	}
+	return mb_substr( $v, 0, 24 );
+}
+/** Phone: digits (and a leading +); a Malaysian mobile that lost its leading 0 in Excel gets it back. */
+function dvb_phone( $v ) {
+	$v    = trim( (string) $v );
+	$plus = str_starts_with( $v, '+' );
+	$d    = preg_replace( '/\D/', '', $v );
+	if ( ! $plus && preg_match( '/^1\d{8,9}$/', $d ) ) {
+		$d = '0' . $d;
+	}
+	return mb_substr( ( $plus ? '+' : '' ) . $d, 0, 40 );
+}
+function dvb_email( $v ) {
+	$v = sanitize_email( (string) $v );
+	return is_email( $v ) ? mb_substr( $v, 0, 160 ) : '';
+}
+function dvb_qty( $v ) {
+	$n = (int) $v;
+	return $n >= 1 && $n <= 99 ? $n : 1;
+}
+function dvb_rev() {
+	return (int) get_option( 'dvb_rev', 0 );
+}
+function dvb_bump() {
+	$r = dvb_rev() + 1;
+	update_option( 'dvb_rev', $r, false );
+	return $r;
+}
+function dvb_client_ip() {
+	return preg_replace( '/[^0-9a-fA-F:.]/', '', (string) ( $_SERVER['REMOTE_ADDR'] ?? '' ) );
+}
+function dvb_settings() {
+	$s = get_option( 'dvb_settings', array() );
+	$s = is_array( $s ) ? $s : array();
+	return array_merge( array(
+		'title'      => 'Grand Deepavali Celebration Ampang',
+		'subtitle'   => 'Resit Pungutan Bantuan Deepavali',
+		'formOpen'   => true,
+		'paper'      => 'roll', // roll = Bluetooth / receipt printer (two copies one after the other), a4 = two copies on one A4 sheet
+		'width'      => 40,     // printable width of the roll in mm (Suresh, 4 Nov 2026: Bluetooth printer, 40 mm)
+		'footer'     => 'Sila simpan resit ini. Please keep this receipt.',
+		'maxPerForm' => 100, // most names on one PIC (bulk) form
+	), $s );
+}
+function dvb_receipt_no( $id ) {
+	return 'B' . str_pad( (string) $id, 4, '0', STR_PAD_LEFT );
+}
+
+/* ---------- access: personal codes (cookie session) or a WordPress admin ---------- */
+
+/** id => array( name, hash, admin ) */
+function dvb_users() {
+	$u = get_option( 'dvb_users', array() );
+	return is_array( $u ) ? $u : array();
+}
+function dvb_sig( $exp, $uid ) {
+	$u = dvb_users()[ $uid ] ?? null;
+	return $u ? hash_hmac( 'sha256', $exp . '|' . $uid . '|' . $u['hash'], wp_salt( 'auth' ) ) : '';
+}
+function dvb_session_user() {
+	$c = explode( '.', (string) ( $_COOKIE[ DVB_COOKIE ] ?? '' ) );
+	if ( 3 !== count( $c ) || ! ctype_digit( $c[0] ) || (int) $c[0] <= time() ) {
+		return null;
+	}
+	$u   = dvb_users()[ $c[1] ] ?? null;
+	$sig = dvb_sig( $c[0], $c[1] );
+	return ( $u && '' !== $sig && hash_equals( $sig, $c[2] ) ) ? array( 'id' => $c[1], 'name' => $u['name'], 'admin' => ! empty( $u['admin'] ) ) : null;
+}
+function dvb_is_wp_admin() {
+	return current_user_can( 'manage_options' );
+}
+function dvb_can() {
+	return dvb_is_wp_admin() || null !== dvb_session_user();
+}
+function dvb_is_admin() {
+	if ( dvb_is_wp_admin() ) {
+		return true;
+	}
+	$u = dvb_session_user();
+	return $u && $u['admin'];
+}
+function dvb_me() {
+	$u = dvb_session_user();
+	if ( $u ) {
+		return $u['name'];
+	}
+	return is_user_logged_in() ? wp_get_current_user()->display_name : '';
+}
+function dvb_set_session( $uid ) {
+	$exp = (string) ( time() + DVB_TTL );
+	setcookie( DVB_COOKIE, $exp . '.' . $uid . '.' . dvb_sig( $exp, $uid ), array(
+		'expires' => (int) $exp, 'path' => '/', 'secure' => is_ssl(), 'httponly' => true, 'samesite' => 'Lax',
+	) );
+}
+/** Adds a person or changes their code (matched by name). */
+function dvb_set_user( $name, $code, $admin = false ) {
+	$name = dvb_text( $name, 60 );
+	$code = trim( (string) $code );
+	if ( '' === $name || strlen( $code ) < 6 || strlen( $code ) > 64 ) {
+		return new WP_Error( 'dvb_bad_code', 'A person needs a name and a code of 6 to 64 characters.', array( 'status' => 400 ) );
+	}
+	$users = dvb_users();
+	foreach ( $users as $k => $u ) {
+		if ( 0 !== strcasecmp( $u['name'], $name ) && wp_check_password( $code, $u['hash'] ) ) {
+			return new WP_Error( 'dvb_dup_code', 'Someone else already uses that code. Pick another.', array( 'status' => 400 ) );
+		}
+	}
+	$id = '';
+	foreach ( $users as $k => $u ) {
+		if ( 0 === strcasecmp( $u['name'], $name ) ) {
+			$id = $k;
+		}
+	}
+	$id           = $id ?: 'u' . wp_rand( 100000, 999999 );
+	$users[ $id ] = array( 'name' => $name, 'hash' => wp_hash_password( $code ), 'admin' => (bool) $admin );
+	update_option( 'dvb_users', $users, false );
+	return $id;
+}
+
+/* ---------- data shaping ---------- */
+
+function dvb_row_out( $r ) {
+	return array(
+		'id'          => (int) $r->id,
+		'ic'          => $r->ic,
+		'name'        => $r->name,
+		'phone'       => $r->phone,
+		'email'       => $r->email,
+		'qty'         => (int) $r->qty,
+		'picName'     => $r->pic_name,
+		'picPhone'    => $r->pic_phone,
+		'picIc'       => $r->pic_ic,
+		'notes'       => $r->notes,
+		'status'      => $r->status,
+		'receiptId'   => (int) $r->receipt_id,
+		'collectedAt' => dvb_iso( $r->collected_at ),
+		'collectedBy' => $r->collected_by,
+		'batch'       => $r->batch,
+		'updatedAt'   => dvb_iso( $r->updated_at ),
+	);
+}
+function dvb_receipt_out( $r ) {
+	return array(
+		'id'         => (int) $r->id,
+		'no'         => dvb_receipt_no( $r->id ),
+		'picName'    => $r->pic_name,
+		'picPhone'   => $r->pic_phone,
+		'picIc'      => $r->pic_ic,
+		'qty'        => (int) $r->qty,
+		'items'      => json_decode( $r->items, true ) ?: array(),
+		'claimId'    => (int) $r->claim_id,
+		'issuedBy'   => $r->issued_by,
+		'createdAt'  => dvb_iso( $r->created_at ),
+		'voidedAt'   => dvb_iso( $r->voided_at ),
+		'voidedBy'   => $r->voided_by,
+		'voidReason' => $r->void_reason,
+	);
+}
+function dvb_claim_out( $r ) {
+	return array(
+		'id'        => (int) $r->id,
+		'ref'       => $r->ref,
+		'picName'   => $r->pic_name,
+		'picPhone'  => $r->pic_phone,
+		'picIc'     => $r->pic_ic,
+		'items'     => json_decode( $r->items, true ) ?: array(),
+		'status'    => $r->status,
+		'receiptId' => (int) $r->receipt_id,
+		'note'      => $r->note,
+		'createdAt' => dvb_iso( $r->created_at ),
+		'updatedAt' => dvb_iso( $r->updated_at ),
+	);
+}
+
+function dvb_state() {
+	global $wpdb;
+	$out = array(
+		'rev'        => dvb_rev(),
+		'recipients' => array_map( 'dvb_row_out', $wpdb->get_results( 'SELECT * FROM ' . dvb_t( 'recipients' ) . ' ORDER BY id ASC' ) ),
+		'receipts'   => array_map( 'dvb_receipt_out', $wpdb->get_results( 'SELECT * FROM ' . dvb_t( 'receipts' ) . ' ORDER BY id DESC' ) ),
+		'claims'     => array_map( 'dvb_claim_out', $wpdb->get_results( 'SELECT * FROM ' . dvb_t( 'claims' ) . ' ORDER BY id DESC LIMIT 3000' ) ),
+		'settings'   => dvb_settings(),
+		'now'        => gmdate( 'c' ),
+	);
+	if ( dvb_is_admin() ) {
+		$out['users'] = array();
+		foreach ( dvb_users() as $id => $u ) {
+			$out['users'][] = array( 'id' => $id, 'name' => $u['name'], 'admin' => ! empty( $u['admin'] ) );
+		}
+	}
+	return $out;
+}
+
+/* ---------- import ---------- */
+
+/**
+ * Adds or updates recipients from Excel rows. Rows are matched on IC; a row without an IC is matched
+ * on name + phone. A collected recipient is never changed by an import.
+ */
+function dvb_import( array $rows, $batch ) {
+	global $wpdb;
+	$t        = dvb_t( 'recipients' );
+	$now      = dvb_now();
+	$by_ic    = array();
+	$by_np    = array();
+	foreach ( $wpdb->get_results( "SELECT id, ic, name, phone, status FROM $t" ) as $r ) {
+		if ( '' !== $r->ic ) {
+			$by_ic[ $r->ic ] = $r;
+		}
+		$by_np[ strtolower( $r->name ) . '|' . $r->phone ] = $r;
+	}
+	$res = array( 'added' => 0, 'updated' => 0, 'skipped' => 0, 'locked' => 0, 'problems' => array() );
+	foreach ( $rows as $i => $in ) {
+		if ( ! is_array( $in ) ) {
+			continue;
+		}
+		$rec = array(
+			'ic'    => dvb_ic( $in['ic'] ?? '' ),
+			'name'  => dvb_text( $in['name'] ?? '', 160 ),
+			'phone' => dvb_phone( $in['phone'] ?? '' ),
+			'email' => dvb_email( $in['email'] ?? '' ),
+			'qty'   => dvb_qty( $in['qty'] ?? 1 ),
+		);
+		foreach ( array( 'picName' => 'pic_name', 'picPhone' => 'pic_phone', 'picIc' => 'pic_ic', 'notes' => 'notes' ) as $k => $col ) {
+			$v = $in[ $k ] ?? '';
+			if ( '' !== trim( (string) $v ) ) {
+				$rec[ $col ] = 'pic_phone' === $col ? dvb_phone( $v ) : ( 'pic_ic' === $col ? dvb_ic( $v ) : dvb_text( $v, 'notes' === $col ? 500 : 120 ) );
+			}
+		}
+		$line = (int) ( $in['line'] ?? ( $i + 2 ) );
+		if ( '' === $rec['name'] ) {
+			$res['skipped']++;
+			$res['problems'][] = array( 'line' => $line, 'msg' => 'No name' );
+			continue;
+		}
+		$hit = '' !== $rec['ic'] ? ( $by_ic[ $rec['ic'] ] ?? null ) : ( $by_np[ strtolower( $rec['name'] ) . '|' . $rec['phone'] ] ?? null );
+		if ( $hit ) {
+			if ( 'collected' === $hit->status ) {
+				$res['locked']++;
+				continue;
+			}
+			$rec['updated_at'] = $now;
+			$wpdb->update( $t, $rec, array( 'id' => $hit->id ) );
+			$res['updated']++;
+			continue;
+		}
+		$rec += array( 'pic_name' => '', 'pic_phone' => '', 'pic_ic' => '', 'notes' => '' );
+		$rec['batch']      = dvb_text( $batch, 60 );
+		$rec['status']     = 'pending';
+		$rec['created_at'] = $now;
+		$rec['updated_at'] = $now;
+		$wpdb->insert( $t, $rec );
+		$obj = (object) array( 'id' => $wpdb->insert_id, 'ic' => $rec['ic'], 'name' => $rec['name'], 'phone' => $rec['phone'], 'status' => 'pending' );
+		if ( '' !== $rec['ic'] ) {
+			$by_ic[ $rec['ic'] ] = $obj;
+		}
+		$by_np[ strtolower( $rec['name'] ) . '|' . $rec['phone'] ] = $obj;
+		$res['added']++;
+	}
+	dvb_bump();
+	return $res;
+}
+
+/* ---------- collect: marks recipients collected and issues one receipt ---------- */
+
+function dvb_collect( array $ids, array $pic, $claim_id, $who ) {
+	global $wpdb;
+	$t   = dvb_t( 'recipients' );
+	$ids = array_values( array_unique( array_filter( array_map( 'intval', $ids ) ) ) );
+	if ( ! $ids ) {
+		return new WP_Error( 'dvb_none', 'Pick at least one name.', array( 'status' => 400 ) );
+	}
+	if ( count( $ids ) > 200 ) {
+		return new WP_Error( 'dvb_many', 'At most 200 names on one receipt.', array( 'status' => 400 ) );
+	}
+	$pic = array(
+		'pic_name'  => dvb_text( $pic['name'] ?? '', 120 ),
+		'pic_phone' => dvb_phone( $pic['phone'] ?? '' ),
+		'pic_ic'    => dvb_ic( $pic['ic'] ?? '' ),
+	);
+	if ( '' === $pic['pic_name'] ) {
+		return new WP_Error( 'dvb_pic', 'Who is collecting? Enter the PIC name.', array( 'status' => 400 ) );
+	}
+	$in   = implode( ',', $ids );
+	$rows = $wpdb->get_results( "SELECT * FROM $t WHERE id IN ($in)" );
+	if ( count( $rows ) !== count( $ids ) ) {
+		return new WP_Error( 'dvb_gone', 'Some names are no longer on the list. Refresh and try again.', array( 'status' => 409 ) );
+	}
+	$done = array_filter( $rows, fn( $r ) => 'pending' !== $r->status );
+	if ( $done ) {
+		$names = implode( ', ', array_map( fn( $r ) => $r->name . ' (' . dvb_receipt_no( $r->receipt_id ) . ')', $done ) );
+		return new WP_Error( 'dvb_already', 'Already collected: ' . $names . '.', array( 'status' => 409 ) );
+	}
+	$items = array();
+	$qty   = 0;
+	foreach ( $rows as $r ) {
+		$items[] = array( 'id' => (int) $r->id, 'name' => $r->name, 'ic' => $r->ic, 'qty' => (int) $r->qty );
+		$qty    += (int) $r->qty;
+	}
+	$now = dvb_now();
+	$wpdb->insert( dvb_t( 'receipts' ), array(
+		'pic_name'   => $pic['pic_name'],
+		'pic_phone'  => $pic['pic_phone'],
+		'pic_ic'     => $pic['pic_ic'],
+		'qty'        => $qty,
+		'items'      => wp_json_encode( $items ),
+		'claim_id'   => (int) $claim_id,
+		'issued_by'  => dvb_text( $who, 80 ),
+		'created_at' => $now,
+	) );
+	$rid = (int) $wpdb->insert_id;
+	if ( ! $rid ) {
+		return new WP_Error( 'dvb_db', 'Could not save the receipt. Try again.', array( 'status' => 500 ) );
+	}
+	// only rows still pending are taken, so two stations can never hand out the same name twice
+	$n = (int) $wpdb->query( $wpdb->prepare(
+		"UPDATE $t SET status = 'collected', receipt_id = %d, collected_at = %s, collected_by = %s, updated_at = %s WHERE id IN ($in) AND status = 'pending'",
+		$rid, $now, dvb_text( $who, 80 ), $now
+	) );
+	if ( $n !== count( $ids ) ) {
+		$wpdb->query( $wpdb->prepare( "UPDATE $t SET status = 'pending', receipt_id = 0, collected_at = NULL, collected_by = '' WHERE receipt_id = %d", $rid ) );
+		$wpdb->delete( dvb_t( 'receipts' ), array( 'id' => $rid ) );
+		return new WP_Error( 'dvb_race', 'Another station just collected one of these names. Refresh and try again.', array( 'status' => 409 ) );
+	}
+	if ( $claim_id ) {
+		$wpdb->update( dvb_t( 'claims' ), array( 'status' => 'done', 'receipt_id' => $rid, 'updated_at' => $now ), array( 'id' => (int) $claim_id ) );
+	}
+	dvb_bump();
+	return dvb_receipt_out( $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . dvb_t( 'receipts' ) . ' WHERE id = %d', $rid ) ) );
+}
+
+/* ---------- public form: a PIC lists who they collect for ---------- */
+
+function dvb_mask_name( $name ) {
+	$parts = preg_split( '/\s+/', trim( $name ) );
+	$out   = array();
+	foreach ( $parts as $p ) {
+		$len   = mb_strlen( $p );
+		$out[] = $len <= 2 ? mb_substr( $p, 0, 1 ) . '*' : mb_substr( $p, 0, 2 ) . str_repeat( '*', min( 6, $len - 2 ) );
+	}
+	return implode( ' ', array_slice( $out, 0, 4 ) );
+}
+
+function dvb_submit_form( WP_REST_Request $r ) {
+	global $wpdb;
+	$s = dvb_settings();
+	if ( empty( $s['formOpen'] ) ) {
+		return new WP_Error( 'dvb_closed', 'Borang ditutup buat masa ini. The form is closed for now.', array( 'status' => 403 ) );
+	}
+	if ( '' !== trim( (string) $r->get_param( 'website' ) ) ) { // honeypot
+		return new WP_Error( 'dvb_bot', 'Could not submit.', array( 'status' => 400 ) );
+	}
+	// only lookups that miss count, so many honest PICs on one venue Wi-Fi never lock the form
+	$key   = 'dvb_form_' . md5( dvb_client_ip() );
+	$tries = (int) get_transient( $key );
+	if ( $tries >= 60 ) {
+		return new WP_Error( 'dvb_slow', 'Terlalu banyak cubaan. Cuba lagi dalam 30 minit. Too many tries, wait 30 minutes.', array( 'status' => 429 ) );
+	}
+	$miss = function ( $n = 1 ) use ( $key, $tries ) {
+		set_transient( $key, $tries + $n, 30 * MINUTE_IN_SECONDS );
+	};
+
+	$pic = array(
+		'name'  => dvb_text( $r->get_param( 'picName' ), 120 ),
+		'phone' => dvb_phone( $r->get_param( 'picPhone' ) ),
+		'ic'    => dvb_ic( $r->get_param( 'picIc' ) ),
+	);
+	if ( '' === $pic['name'] || strlen( preg_replace( '/\D/', '', $pic['phone'] ) ) < 9 || strlen( $pic['ic'] ) < 6 ) {
+		$miss();
+		return new WP_Error( 'dvb_pic', 'Sila isi nama, no. telefon dan no. kad pengenalan anda. Please fill in your name, phone and IC.', array( 'status' => 400 ) );
+	}
+	// individual form (/bantuan/borang/): only the person themselves; PIC form (/bantuan/pic/): many names in one go
+	$bulk  = 'pic' === $r->get_param( 'mode' );
+	$ics   = array();
+	$typed = array(); // IC => name as the PIC typed it (their own words, shown back to them and to the counter)
+	$names = (array) $r->get_param( 'names' );
+	foreach ( $bulk ? array_values( (array) $r->get_param( 'ics' ) ) : array() as $k => $v ) {
+		$v = dvb_ic( $v );
+		if ( '' !== $v && ! in_array( $v, $ics, true ) ) {
+			$ics[]       = $v;
+			$typed[ $v ] = dvb_text( $names[ $k ] ?? '', 120 );
+		}
+	}
+	if ( ( ! $bulk || $r->get_param( 'self' ) ) && ! in_array( $pic['ic'], $ics, true ) ) {
+		array_unshift( $ics, $pic['ic'] );
+		$typed[ $pic['ic'] ] = $pic['name'];
+	}
+	$max = $bulk ? max( 1, (int) $s['maxPerForm'] ) : 1;
+	$t   = dvb_t( 'recipients' );
+	// names assigned to this PIC on the list are offered at the counter, after staff check the PIC's IC; never revealed here
+	$listed = $bulk && (bool) $r->get_param( 'listed' );
+	if ( ! $ics && ! $listed ) {
+		return new WP_Error( 'dvb_noic', 'Masukkan sekurang-kurangnya satu no. kad pengenalan penerima. Enter at least one recipient IC.', array( 'status' => 400 ) );
+	}
+	if ( count( $ics ) > $max ) {
+		return new WP_Error( 'dvb_max', "Maksimum $max penerima bagi satu borang. At most $max recipients per form.", array( 'status' => 400 ) );
+	}
+	// open forms that already list a recipient
+	$open = array();
+	foreach ( $wpdb->get_results( 'SELECT ref, items FROM ' . dvb_t( 'claims' ) . " WHERE status = 'new'" ) as $c ) {
+		foreach ( json_decode( $c->items, true ) ?: array() as $it ) {
+			if ( ! empty( $it['rid'] ) ) {
+				$open[ (int) $it['rid'] ] = $c->ref;
+			}
+		}
+	}
+	$items = array();
+	$seen  = array();
+	$push  = function ( $ic, $row, $how ) use ( &$items, &$seen, $open, $typed ) {
+		if ( $row && isset( $seen[ $row->id ] ) ) {
+			return;
+		}
+		if ( ! $row ) {
+			$items[] = array( 'ic' => $ic, 'rid' => 0, 'result' => 'notfound', 'how' => $how, 'typed' => $typed[ $ic ] ?? '' );
+			return;
+		}
+		$seen[ $row->id ] = true;
+		$result           = 'collected' === $row->status ? 'collected' : ( isset( $open[ (int) $row->id ] ) ? 'inform' : 'ok' );
+		$items[]          = array( 'ic' => $row->ic, 'rid' => (int) $row->id, 'result' => $result, 'how' => $how, 'other' => $open[ (int) $row->id ] ?? '', 'qty' => (int) $row->qty, 'typed' => $typed[ $ic ] ?? '' );
+	};
+	foreach ( $ics as $ic ) {
+		$push( $ic, $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $t WHERE ic = %s LIMIT 1", $ic ) ), 'typed' );
+	}
+	$good = array_filter( $items, fn( $i ) => in_array( $i['result'], array( 'ok', 'inform' ), true ) );
+	$bad  = count( array_filter( $items, fn( $i ) => 'notfound' === $i['result'] ) );
+	if ( $bad ) {
+		$miss( $bad );
+	}
+	$pub  = array_map( fn( $i ) => array(
+		'ic'     => $i['ic'] ? substr( $i['ic'], 0, 0 ) . str_repeat( '*', max( 0, strlen( $i['ic'] ) - 4 ) ) . substr( $i['ic'], -4 ) : '',
+		'result' => $i['result'],
+		'how'    => $i['how'],
+		'qty'    => $i['qty'] ?? 0,
+		'name'   => $i['typed'] ?? '',
+	), $items );
+	if ( ! $good && ! $listed ) {
+		return rest_ensure_response( array( 'ok' => false, 'items' => $pub, 'message' => 'Tiada penerima yang boleh dipungut dalam senarai. None of these can be collected.' ) );
+	}
+	$now = dvb_now();
+	$ref = '';
+	for ( $i = 0; $i < 60 && '' === $ref; $i++ ) {
+		$try = (string) wp_rand( $i < 40 ? 1000 : 10000, $i < 40 ? 9999 : 99999 );
+		if ( ! $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . dvb_t( 'claims' ) . ' WHERE ref = %s', $try ) ) ) {
+			$ref = $try;
+		}
+	}
+	$wpdb->insert( dvb_t( 'claims' ), array(
+		'ref'        => $ref,
+		'pic_name'   => $pic['name'],
+		'pic_phone'  => $pic['phone'],
+		'pic_ic'     => $pic['ic'],
+		'items'      => wp_json_encode( $items ),
+		'status'     => 'new',
+		'note'       => $listed ? 'listed' : '',
+		'ip'         => dvb_client_ip(),
+		'created_at' => $now,
+		'updated_at' => $now,
+	) );
+	dvb_bump();
+	if ( ! $ics ) {
+		$miss(); // an IC-less form reveals nothing, but count it so it cannot be spammed
+	}
+	$qty = array_sum( array_map( fn( $i ) => (int) $i['qty'], $good ) );
+	return rest_ensure_response( array( 'ok' => true, 'listed' => $listed, 'ref' => $ref, 'count' => count( $good ), 'qty' => $qty, 'items' => $pub, 'picName' => $pic['name'], 'at' => gmdate( 'c' ) ) );
+}
+
+/* ---------- route ---------- */
+
+add_action( 'init', function () {
+	add_rewrite_rule( '^' . DVB_SLUG . '/?$', 'index.php?dvb_app=station', 'top' );
+	add_rewrite_rule( '^' . DVB_SLUG . '/borang/?$', 'index.php?dvb_app=form', 'top' );
+	add_rewrite_rule( '^' . DVB_SLUG . '/pic/?$', 'index.php?dvb_app=pic', 'top' );
+	if ( get_option( 'dvb_rewrite' ) !== DVB_VERSION ) {
+		flush_rewrite_rules( false );
+		update_option( 'dvb_rewrite', DVB_VERSION, true );
+	}
+	if ( (int) get_option( 'dvb_db' ) !== DVB_DB ) {
+		dvb_install();
+	}
+} );
+add_filter( 'query_vars', function ( $vars ) {
+	$vars[] = 'dvb_app';
+	return $vars;
+} );
+register_activation_hook( __FILE__, function () {
+	delete_option( 'dvb_rewrite' );
+	dvb_install();
+} );
+
+/* ---------- REST ---------- */
+
+add_action( 'rest_api_init', function () {
+	$hdr   = fn( WP_REST_Request $r ) => '1' === $r->get_header( 'x_dvb' );
+	$staff = function ( WP_REST_Request $r ) use ( $hdr ) {
+		// custom header forces a CORS preflight, so other sites cannot post with a station cookie
+		if ( ! $hdr( $r ) ) {
+			return new WP_Error( 'dvb_forbidden', 'Missing app header.', array( 'status' => 403 ) );
+		}
+		return dvb_can() ? true : new WP_Error( 'dvb_login', 'Sign in with your station code.', array( 'status' => 401 ) );
+	};
+	$admin = function ( WP_REST_Request $r ) use ( $staff ) {
+		$ok = $staff( $r );
+		if ( true !== $ok ) {
+			return $ok;
+		}
+		return dvb_is_admin() ? true : new WP_Error( 'dvb_admin', 'Only an admin can do this.', array( 'status' => 403 ) );
+	};
+	$route = function ( $path, $method, $perm, $cb ) {
+		register_rest_route( DVB_NS, $path, array( 'methods' => $method, 'permission_callback' => $perm, 'callback' => $cb ) );
+	};
+
+	$route( '/login', 'POST', '__return_true', function ( WP_REST_Request $r ) use ( $hdr ) {
+		if ( ! $hdr( $r ) ) {
+			return new WP_Error( 'dvb_forbidden', 'Missing app header.', array( 'status' => 403 ) );
+		}
+		$key   = 'dvb_tries_' . md5( dvb_client_ip() );
+		$tries = (int) get_transient( $key );
+		if ( $tries >= 10 ) {
+			return new WP_Error( 'dvb_slow', 'Too many tries. Wait 10 minutes and try again.', array( 'status' => 429 ) );
+		}
+		$code = trim( (string) $r->get_param( 'code' ) );
+		$who  = null;
+		foreach ( dvb_users() as $id => $u ) {
+			if ( '' !== $code && wp_check_password( $code, $u['hash'] ) ) {
+				$who = array( 'id' => $id, 'name' => $u['name'] );
+				break;
+			}
+		}
+		if ( ! $who ) {
+			set_transient( $key, $tries + 1, 10 * MINUTE_IN_SECONDS );
+			return new WP_Error( 'dvb_wrong', 'That code is not right.', array( 'status' => 401 ) );
+		}
+		delete_transient( $key );
+		dvb_set_session( $who['id'] );
+		return rest_ensure_response( array( 'ok' => true, 'name' => $who['name'] ) );
+	} );
+	$route( '/logout', 'POST', '__return_true', function ( WP_REST_Request $r ) use ( $hdr ) {
+		if ( ! $hdr( $r ) ) {
+			return new WP_Error( 'dvb_forbidden', 'Missing app header.', array( 'status' => 403 ) );
+		}
+		setcookie( DVB_COOKIE, '', array( 'expires' => time() - 3600, 'path' => '/', 'secure' => is_ssl(), 'httponly' => true, 'samesite' => 'Lax' ) );
+		return rest_ensure_response( array( 'ok' => true ) );
+	} );
+	$route( '/state', 'GET', $staff, function ( WP_REST_Request $r ) {
+		$since = (int) $r->get_param( 'since' );
+		if ( $since && $since === dvb_rev() ) {
+			return rest_ensure_response( array( 'rev' => $since, 'unchanged' => true ) );
+		}
+		return rest_ensure_response( dvb_state() );
+	} );
+	$route( '/import', 'POST', $staff, function ( WP_REST_Request $r ) {
+		global $wpdb;
+		$rows = (array) $r->get_param( 'rows' );
+		if ( count( $rows ) > 1000 ) {
+			return new WP_Error( 'dvb_chunk', 'Send at most 1000 rows at a time.', array( 'status' => 400 ) );
+		}
+		if ( $r->get_param( 'replace' ) ) {
+			if ( ! dvb_is_admin() ) {
+				return new WP_Error( 'dvb_admin', 'Only an admin can replace the whole list.', array( 'status' => 403 ) );
+			}
+			$n = (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . dvb_t( 'recipients' ) . " WHERE status <> 'pending'" );
+			if ( $n ) {
+				return new WP_Error( 'dvb_locked', "$n people have already collected, so the list cannot be replaced. Use Add or update instead.", array( 'status' => 409 ) );
+			}
+			$wpdb->query( 'DELETE FROM ' . dvb_t( 'recipients' ) );
+		}
+		return rest_ensure_response( dvb_import( $rows, (string) $r->get_param( 'batch' ) ) );
+	} );
+	$route( '/recipient', 'POST', $staff, function ( WP_REST_Request $r ) {
+		global $wpdb;
+		$t   = dvb_t( 'recipients' );
+		$in  = (array) $r->get_param( 'item' );
+		$id  = (int) ( $in['id'] ?? 0 );
+		$rec = array(
+			'ic'        => dvb_ic( $in['ic'] ?? '' ),
+			'name'      => dvb_text( $in['name'] ?? '', 160 ),
+			'phone'     => dvb_phone( $in['phone'] ?? '' ),
+			'email'     => dvb_email( $in['email'] ?? '' ),
+			'qty'       => dvb_qty( $in['qty'] ?? 1 ),
+			'pic_name'  => dvb_text( $in['picName'] ?? '', 120 ),
+			'pic_phone' => dvb_phone( $in['picPhone'] ?? '' ),
+			'pic_ic'    => dvb_ic( $in['picIc'] ?? '' ),
+			'notes'     => dvb_text( $in['notes'] ?? '', 500 ),
+		);
+		if ( '' === $rec['name'] ) {
+			return new WP_Error( 'dvb_name', 'A recipient needs a name.', array( 'status' => 400 ) );
+		}
+		if ( '' !== $rec['ic'] ) {
+			$dup = $wpdb->get_row( $wpdb->prepare( "SELECT id, name FROM $t WHERE ic = %s AND id <> %d", $rec['ic'], $id ) );
+			if ( $dup ) {
+				return new WP_Error( 'dvb_dup', 'That IC is already on the list as ' . $dup->name . '.', array( 'status' => 409 ) );
+			}
+		}
+		$rec['updated_at'] = dvb_now();
+		if ( $id ) {
+			$cur = $wpdb->get_row( $wpdb->prepare( "SELECT status FROM $t WHERE id = %d", $id ) );
+			if ( ! $cur ) {
+				return new WP_Error( 'dvb_gone', 'That recipient is no longer on the list.', array( 'status' => 404 ) );
+			}
+			if ( 'pending' !== $cur->status ) {
+				// the receipt holds these; changing name or IC after collection would let the same person collect twice
+				unset( $rec['qty'], $rec['pic_name'], $rec['pic_phone'], $rec['pic_ic'], $rec['name'], $rec['ic'] );
+			}
+			$wpdb->update( $t, $rec, array( 'id' => $id ) );
+		} else {
+			$rec += array( 'status' => 'pending', 'batch' => 'manual', 'created_at' => $rec['updated_at'] );
+			$wpdb->insert( $t, $rec );
+			$id = (int) $wpdb->insert_id;
+		}
+		dvb_bump();
+		return rest_ensure_response( dvb_row_out( $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $t WHERE id = %d", $id ) ) ) );
+	} );
+	$route( '/recipient/delete', 'POST', $admin, function ( WP_REST_Request $r ) {
+		global $wpdb;
+		$ids = array_filter( array_map( 'intval', (array) $r->get_param( 'ids' ) ) );
+		if ( ! $ids ) {
+			return new WP_Error( 'dvb_none', 'Nothing to delete.', array( 'status' => 400 ) );
+		}
+		$n = (int) $wpdb->query( 'DELETE FROM ' . dvb_t( 'recipients' ) . ' WHERE id IN (' . implode( ',', $ids ) . ") AND status = 'pending'" );
+		dvb_bump();
+		return rest_ensure_response( array( 'deleted' => $n, 'kept' => count( $ids ) - $n ) );
+	} );
+	$route( '/pic', 'POST', $staff, function ( WP_REST_Request $r ) {
+		global $wpdb;
+		$ids = array_filter( array_map( 'intval', (array) $r->get_param( 'ids' ) ) );
+		if ( ! $ids ) {
+			return new WP_Error( 'dvb_none', 'Pick at least one name.', array( 'status' => 400 ) );
+		}
+		$n = (int) $wpdb->query( $wpdb->prepare(
+			'UPDATE ' . dvb_t( 'recipients' ) . ' SET pic_name = %s, pic_phone = %s, pic_ic = %s, updated_at = %s WHERE id IN (' . implode( ',', $ids ) . ") AND status = 'pending'",
+			dvb_text( $r->get_param( 'picName' ), 120 ), dvb_phone( $r->get_param( 'picPhone' ) ), dvb_ic( $r->get_param( 'picIc' ) ), dvb_now()
+		) );
+		dvb_bump();
+		return rest_ensure_response( array( 'updated' => $n ) );
+	} );
+	$route( '/collect', 'POST', $staff, function ( WP_REST_Request $r ) {
+		$res = dvb_collect( (array) $r->get_param( 'ids' ), (array) $r->get_param( 'pic' ), (int) $r->get_param( 'claimId' ), dvb_me() ?: 'Station' );
+		return is_wp_error( $res ) ? $res : rest_ensure_response( $res );
+	} );
+	$route( '/void', 'POST', $admin, function ( WP_REST_Request $r ) {
+		global $wpdb;
+		$id     = (int) $r->get_param( 'id' );
+		$reason = dvb_text( $r->get_param( 'reason' ), 300 );
+		if ( '' === $reason ) {
+			return new WP_Error( 'dvb_reason', 'Say why this receipt is cancelled.', array( 'status' => 400 ) );
+		}
+		$rc = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . dvb_t( 'receipts' ) . ' WHERE id = %d', $id ) );
+		if ( ! $rc || $rc->voided_at ) {
+			return new WP_Error( 'dvb_gone', 'That receipt is not active.', array( 'status' => 409 ) );
+		}
+		$now = dvb_now();
+		$wpdb->update( dvb_t( 'receipts' ), array( 'voided_at' => $now, 'voided_by' => dvb_text( dvb_me(), 80 ), 'void_reason' => $reason ), array( 'id' => $id ) );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . dvb_t( 'recipients' ) . " SET status = 'pending', receipt_id = 0, collected_at = NULL, collected_by = '', updated_at = %s WHERE receipt_id = %d", $now, $id ) );
+		if ( $rc->claim_id ) {
+			$wpdb->update( dvb_t( 'claims' ), array( 'status' => 'new', 'receipt_id' => 0, 'updated_at' => $now ), array( 'id' => (int) $rc->claim_id ) );
+		}
+		dvb_bump();
+		return rest_ensure_response( array( 'ok' => true ) );
+	} );
+	$route( '/claim', 'POST', $staff, function ( WP_REST_Request $r ) {
+		global $wpdb;
+		$id     = (int) $r->get_param( 'id' );
+		$status = (string) $r->get_param( 'status' );
+		if ( ! in_array( $status, array( 'new', 'rejected' ), true ) ) {
+			return new WP_Error( 'dvb_status', 'Unknown status.', array( 'status' => 400 ) );
+		}
+		$wpdb->update( dvb_t( 'claims' ), array( 'status' => $status, 'note' => dvb_text( $r->get_param( 'note' ), 300 ), 'updated_at' => dvb_now() ), array( 'id' => $id, 'receipt_id' => 0 ) );
+		dvb_bump();
+		return rest_ensure_response( array( 'ok' => true ) );
+	} );
+	$route( '/settings', 'POST', $admin, function ( WP_REST_Request $r ) {
+		$in = (array) $r->get_param( 'settings' );
+		$s  = dvb_settings();
+		foreach ( array( 'title' => 80, 'subtitle' => 120, 'footer' => 200 ) as $k => $max ) {
+			if ( isset( $in[ $k ] ) ) {
+				$s[ $k ] = dvb_text( $in[ $k ], $max );
+			}
+		}
+		if ( isset( $in['formOpen'] ) ) {
+			$s['formOpen'] = (bool) $in['formOpen'];
+		}
+		if ( isset( $in['paper'] ) && in_array( $in['paper'], array( 'a4', 'roll' ), true ) ) {
+			$s['paper'] = $in['paper'];
+		}
+		if ( isset( $in['width'] ) ) {
+			$s['width'] = max( 30, min( 80, (int) $in['width'] ) );
+		}
+		if ( isset( $in['maxPerForm'] ) ) {
+			$s['maxPerForm'] = max( 1, min( 200, (int) $in['maxPerForm'] ) );
+		}
+		update_option( 'dvb_settings', $s, false );
+		dvb_bump();
+		return rest_ensure_response( $s );
+	} );
+	$route( '/users', 'POST', $admin, function ( WP_REST_Request $r ) {
+		if ( $r->get_param( 'remove' ) ) {
+			$users = dvb_users();
+			unset( $users[ (string) $r->get_param( 'remove' ) ] );
+			update_option( 'dvb_users', $users, false );
+		} else {
+			$id = dvb_set_user( $r->get_param( 'name' ), $r->get_param( 'code' ), (bool) $r->get_param( 'admin' ) );
+			if ( is_wp_error( $id ) ) {
+				return $id;
+			}
+		}
+		dvb_bump();
+		return rest_ensure_response( dvb_state()['users'] );
+	} );
+	$route( '/form', 'POST', '__return_true', function ( WP_REST_Request $r ) use ( $hdr ) {
+		if ( ! $hdr( $r ) ) {
+			return new WP_Error( 'dvb_forbidden', 'Missing app header.', array( 'status' => 403 ) );
+		}
+		return dvb_submit_form( $r );
+	} );
+} );
+
+/** Never cache or index this app's API. */
+add_filter( 'rest_post_dispatch', function ( $res, $server, $req ) {
+	if ( $res instanceof WP_REST_Response && $req instanceof WP_REST_Request && 0 === strpos( ltrim( $req->get_route(), '/' ), DVB_NS ) ) {
+		$res->header( 'Cache-Control', 'no-store, private, max-age=0' );
+		$res->header( 'X-LiteSpeed-Cache-Control', 'no-cache' );
+		$res->header( 'X-Robots-Tag', 'noindex, nofollow' );
+	}
+	return $res;
+}, 99, 3 );
+
+/* ---------- pages: /bantuan/ (station) and /bantuan/borang/ (public form), outside the theme ---------- */
+
+add_action( 'template_redirect', function () {
+	$app = get_query_var( 'dvb_app' );
+	if ( ! in_array( $app, array( 'station', 'form', 'pic' ), true ) ) {
+		return;
+	}
+	nocache_headers();
+	header( 'X-Robots-Tag: noindex, nofollow', true );
+	header( 'X-LiteSpeed-Cache-Control: no-cache', true );
+	$base   = plugin_dir_url( __FILE__ ) . 'assets/';
+	$fonts  = plugins_url( 'deepavali-floor/assets/fonts/' );
+	$v      = DVB_VERSION;
+	$s      = dvb_settings();
+	$config = array(
+		'rest'    => esc_url_raw( rest_url( DVB_NS . '/' ) ),
+		'nonce'   => is_user_logged_in() ? wp_create_nonce( 'wp_rest' ) : '',
+		'formUrl' => home_url( '/' . DVB_SLUG . '/borang/' ),
+		'selfUrl' => home_url( '/' . DVB_SLUG . '/borang/' ),
+		'picUrl'  => home_url( '/' . DVB_SLUG . '/pic/' ),
+		'tz'      => DVB_TZ,
+		'version' => $v,
+	);
+	if ( 'station' === $app ) {
+		$config += array( 'authed' => dvb_can(), 'admin' => dvb_is_admin(), 'user' => dvb_me(), 'loginUrl' => wp_login_url( home_url( '/' . DVB_SLUG . '/' ) ) );
+	} else {
+		$config += array( 'title' => $s['title'], 'open' => (bool) $s['formOpen'], 'max' => (int) $s['maxPerForm'], 'mode' => 'pic' === $app ? 'pic' : 'self' );
+	}
+	$title = 'station' === $app ? 'Bantuan station · Grand Deepavali Ampang' : 'Borang pungutan bantuan · Grand Deepavali Ampang';
+	?><!doctype html>
+<html lang="<?php echo 'station' === $app ? 'en' : 'ms'; ?>">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#8B1E2D">
+<meta name="color-scheme" content="light">
+<title><?php echo esc_html( $title ); ?></title>
+<link rel="icon" type="image/svg+xml" href="<?php echo esc_url( plugins_url( 'deepavali-floor/assets/icons/diya.svg' ) ); ?>">
+<style>
+@font-face { font-family: "Inter"; src: url("<?php echo esc_url( $fonts . 'inter-latin-wght.woff2' ); ?>") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Rajdhani"; src: url("<?php echo esc_url( $fonts . 'rajdhani-latin-600.woff2' ); ?>") format("woff2"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Rajdhani"; src: url("<?php echo esc_url( $fonts . 'rajdhani-latin-700.woff2' ); ?>") format("woff2"); font-weight: 700; font-display: swap; }
+</style>
+<link rel="stylesheet" href="<?php echo esc_url( $base . 'bantuan.css?v=' . $v ); ?>">
+</head>
+<body class="bt-body bt-<?php echo 'station' === $app ? 'station' : 'form'; ?>">
+<div id="bt-app"></div>
+<div id="bt-print" aria-hidden="true"></div>
+<script>window.DVB_CONFIG = <?php echo wp_json_encode( $config ); ?>;</script>
+<?php if ( 'station' === $app ) : ?>
+<script src="<?php echo esc_url( plugins_url( 'deepavali-floor/assets/xlsx.min.js' ) . '?v=0.18.5' ); ?>" defer></script>
+<script src="<?php echo esc_url( $base . 'qrcode.js?v=2.0.4' ); ?>" defer></script>
+<script src="<?php echo esc_url( $base . 'station.js?v=' . $v ); ?>" defer></script>
+<?php else : ?>
+<script src="<?php echo esc_url( $base . 'form.js?v=' . $v ); ?>" defer></script>
+<?php endif; ?>
+</body>
+</html>
+	<?php
+	exit;
+} );
