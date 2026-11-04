@@ -2,14 +2,14 @@
 /**
  * Plugin Name: Deepavali Bantuan Collection
  * Description: Bantuan (Deepavali goods) collection for Grand Deepavali Celebration Ampang. Station app at /bantuan/ (Excel import of recipients, person in charge (PIC) per recipient, mark collected, two-copy receipt) and two public QR forms: /bantuan/borang/ for one person collecting their own, /bantuan/pic/ for a PIC listing many names in one go. Station staff sign in with their own access code; WordPress admins get in directly.
- * Version: 1.2.7
+ * Version: 1.3.0
  * Author: Carama Technologies Solution
  * Requires at least: 6.4
  * Requires PHP: 8.0
  * License: Proprietary
  */
 
- defined( 'ABSPATH' ) || exit; const DVB_VERSION = '1.2.7'; const DVB_DB = 1; const DVB_SLUG = 'bantuan'; const DVB_NS = 'dvb/v1'; const DVB_COOKIE = 'dvb_s'; const DVB_TTL = 2 * DAY_IN_SECONDS; const DVB_TZ = 'Asia/Kuala_Lumpur'; function dvb_t( $name ) { global $wpdb; return $wpdb->prefix . 'dvb_' . $name; } function dvb_install() { global $wpdb; require_once ABSPATH . 'wp-admin/includes/upgrade.php'; $cs = $wpdb->get_charset_collate(); dbDelta( 'CREATE TABLE ' . dvb_t( 'recipients' ) . " (
+ defined( 'ABSPATH' ) || exit; const DVB_VERSION = '1.3.0'; const DVB_DB = 1; const DVB_SLUG = 'bantuan'; const DVB_NS = 'dvb/v1'; const DVB_COOKIE = 'dvb_s'; const DVB_TTL = 2 * DAY_IN_SECONDS; const DVB_TZ = 'Asia/Kuala_Lumpur'; function dvb_t( $name ) { global $wpdb; return $wpdb->prefix . 'dvb_' . $name; } function dvb_install() { global $wpdb; require_once ABSPATH . 'wp-admin/includes/upgrade.php'; $cs = $wpdb->get_charset_collate(); dbDelta( 'CREATE TABLE ' . dvb_t( 'recipients' ) . " (
   id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   ic varchar(24) NOT NULL DEFAULT '',
   name varchar(160) NOT NULL DEFAULT '',
