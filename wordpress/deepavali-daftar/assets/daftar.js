@@ -26,12 +26,13 @@
     }
     app.innerHTML = '<div class="wrap">' + HERO +
       '<form class="card" id="f" novalidate autocomplete="on">' +
+      '<p class="intro">Kami mengambil maklumat penduduk Ampang supaya pada masa hadapan, sekiranya ada inisiatif atau bantuan, kami boleh menghubungi atau memaklumkan kepada tuan/puan dengan cepat.</p>' +
       '<div class="f" data-k="name"><label for="name">Nama penuh</label><input id="name" name="name" autocomplete="name" autocapitalize="words" maxlength="160" required><div class="msg hidden"></div></div>' +
       '<div class="f" data-k="ic"><label for="ic">No Kad Pengenalan</label><input id="ic" name="ic" inputmode="numeric" placeholder="800101-14-5678" maxlength="20" required><div class="hint">12 digit seperti dalam MyKad.</div><div class="msg hidden"></div></div>' +
       '<div class="f" data-k="phone"><label for="phone">No telefon bimbit</label><input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="012-345 6789" maxlength="20" required><div class="msg hidden"></div></div>' +
       '<div class="f" data-k="bantuan"><label for="bantuan">Bantuan yang diharapkan <span class="opt">(pilihan)</span></label><textarea id="bantuan" name="bantuan" maxlength="1000" placeholder="Contoh: bantuan persekolahan anak, bantuan makanan, kerja…"></textarea><div class="msg hidden"></div></div>' +
       '<div class="hp" aria-hidden="true"><input name="website" tabindex="-1" autocomplete="off"></div>' +
-      '<label class="consent" id="cl"><input type="checkbox" id="consent"><span>Saya bersetuju maklumat peribadi saya dikumpul dan digunakan oleh penganjur Grand Deepavali Parlimen Ampang untuk tujuan program dan bantuan sahaja, mengikut Akta Perlindungan Data Peribadi 2010 (PDPA). Maklumat ini tidak akan dikongsi dengan pihak lain.</span></label>' +
+      '<label class="consent" id="cl"><input type="checkbox" id="consent"><span>Saya bersetuju maklumat peribadi saya dikumpul dan digunakan oleh penganjur Grand Deepavali Parlimen Ampang untuk tujuan program, inisiatif dan bantuan sahaja, mengikut Akta Perlindungan Data Peribadi 2010 (PDPA). Maklumat ini tidak akan dikongsi dengan pihak lain.</span></label>' +
       '<div id="err" class="alert hidden"></div>' +
       '<button class="btn pri big" id="go" type="submit">Hantar</button>' +
       '</form><div class="foot">Maklumat anda disimpan dengan selamat dan hanya dilihat oleh penganjur.</div></div>';
@@ -130,7 +131,7 @@
         return '<tr><td class="mono">' + r.id + '</td><td>' + esc(r.name) + '</td><td class="mono">' + esc(icShow(r.ic)) + '</td><td class="mono"><a href="tel:' + esc(r.phone) + '">' + esc(r.phone) + '</a></td><td class="b">' + esc(r.bantuan || '') + '</td><td class="mono">' + esc(fmtTime(r.created_at)) + '</td><td><button class="btn sm danger" data-del="' + r.id + '">Padam</button></td></tr>';
       }).join('') : '<tr><td colspan="7" style="text-align:center;color:var(--text-3);padding:24px">' + (S.rows.length ? 'Tiada padanan.' : 'Belum ada pendaftaran.') + '</td></tr>') +
       '</tbody></table></div></div>';
-    var poster = '<h1>GRAND DEEPAVALI</h1><div class="pk">Anjuran Penyelaras Parlimen Ampang<br>&amp; ADUN Lembah Jaya</div><p style="margin-top:8mm"><b>DAFTAR DI SINI</b><br>Imbas kod QR dengan telefon anda<br>Nama · No Kad Pengenalan · No Telefon</p><div class="pq">' + qr + '</div><div class="pu">' + esc(C.formUrl.replace(/^https?:\/\//, '')) + '</div><div class="ps">Maklumat dilindungi di bawah Akta Perlindungan Data Peribadi 2010</div>';
+    var poster = '<h1>GRAND DEEPAVALI</h1><div class="pk">Anjuran Penyelaras Parlimen Ampang<br>&amp; ADUN Lembah Jaya</div><p style="margin-top:6mm;font-size:13pt">Kami mengambil maklumat penduduk Ampang supaya pada masa hadapan, sekiranya ada inisiatif atau bantuan, kami boleh menghubungi atau memaklumkan kepada tuan/puan dengan cepat.</p><p><b>DAFTAR DI SINI</b><br>Imbas kod QR dengan telefon anda<br>Nama · No Kad Pengenalan · No Telefon</p><div class="pq">' + qr + '</div><div class="pu">' + esc(C.formUrl.replace(/^https?:\/\//, '')) + '</div><div class="ps">Maklumat dilindungi di bawah Akta Perlindungan Data Peribadi 2010</div>';
     app.innerHTML = html;
     var pe = document.getElementById('poster');
     if (!pe) { pe = document.createElement('div'); pe.id = 'poster'; document.body.appendChild(pe); }

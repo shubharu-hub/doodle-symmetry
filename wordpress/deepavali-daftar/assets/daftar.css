@@ -70,3 +70,4 @@ button,input,textarea{font:inherit;color:inherit}
   #poster .pu{margin-top:8mm;font:700 20pt/1 var(--font);color:#8B1E2D}
   #poster .ps{margin-top:6mm;font-size:13pt;color:#636D84}
 }
+.intro{margin:0 0 18px;padding:12px 14px;border-left:4px solid var(--marigold);background:#FFF7E6;border-radius:0 12px 12px 0;color:var(--text-2);font-size:15px}
