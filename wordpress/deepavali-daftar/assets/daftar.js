@@ -129,9 +129,12 @@
       (rows.length ? rows.map(function (r) {
         return '<tr><td class="mono">' + r.id + '</td><td>' + esc(r.name) + '</td><td class="mono">' + esc(icShow(r.ic)) + '</td><td class="mono"><a href="tel:' + esc(r.phone) + '">' + esc(r.phone) + '</a></td><td class="b">' + esc(r.bantuan || '') + '</td><td class="mono">' + esc(fmtTime(r.created_at)) + '</td><td><button class="btn sm danger" data-del="' + r.id + '">Padam</button></td></tr>';
       }).join('') : '<tr><td colspan="7" style="text-align:center;color:var(--text-3);padding:24px">' + (S.rows.length ? 'Tiada padanan.' : 'Belum ada pendaftaran.') + '</td></tr>') +
-      '</tbody></table></div></div>' +
-      '<div id="poster"><div class="pk">Grand Deepavali Parlimen Ampang</div><h1>Daftar Di Sini</h1><p>Imbas kod QR dengan telefon anda<br>Nama · No Kad Pengenalan · No Telefon</p><div class="pq">' + qr + '</div><div class="pu">' + esc(C.formUrl.replace(/^https?:\/\//, '')) + '</div><div class="ps">Maklumat dilindungi di bawah Akta Perlindungan Data Peribadi 2010</div></div>';
+      '</tbody></table></div></div>';
+    var poster = '<div class="pk">Grand Deepavali Parlimen Ampang</div><h1>Daftar Di Sini</h1><p>Imbas kod QR dengan telefon anda<br>Nama · No Kad Pengenalan · No Telefon</p><div class="pq">' + qr + '</div><div class="pu">' + esc(C.formUrl.replace(/^https?:\/\//, '')) + '</div><div class="ps">Maklumat dilindungi di bawah Akta Perlindungan Data Peribadi 2010</div>';
     app.innerHTML = html;
+    var pe = document.getElementById('poster');
+    if (!pe) { pe = document.createElement('div'); pe.id = 'poster'; document.body.appendChild(pe); }
+    pe.innerHTML = poster;
     var q = document.getElementById('q');
     q.oninput = function () { S.q = q.value; var pos = q.selectionStart; render(); var n = document.getElementById('q'); n.focus(); n.setSelectionRange(pos, pos); };
     document.getElementById('xl').onclick = excel;
