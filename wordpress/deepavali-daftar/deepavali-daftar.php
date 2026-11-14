@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Deepavali Daftar Orang Ramai
  * Description: Public registration form for the crowd at Grand Deepavali Parlimen Ampang (Nama, No KP, No telefon, Bantuan yang diharapkan) at /daftar/, and an admin-only list with Excel download and QR poster at /daftar/senarai/. Admins = WordPress admins or Bantuan station admin codes.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: Carama Technologies Solution
  * Requires PHP: 8.0
  * License: Proprietary
@@ -10,7 +10,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-const DVD_VERSION = '1.0.0';
+const DVD_VERSION = '1.0.1';
 const DVD_DB      = 1;
 const DVD_SLUG    = 'daftar';
 const DVD_NS      = 'dvd/v1';
@@ -202,6 +202,14 @@ add_filter( 'query_vars', function ( $v ) {
 	$v[] = 'dvd_app';
 	return $v;
 } );
+
+/** http:// pages call the https:// API cross-origin and the browser blocks it, so always serve these apps over https. */
+add_action( 'template_redirect', function () {
+	if ( ! is_ssl() && ( get_query_var( 'dvd_app' ) || get_query_var( 'dvb_app' ) ) ) {
+		wp_safe_redirect( 'https://' . wp_parse_url( home_url(), PHP_URL_HOST ) . ( $_SERVER['REQUEST_URI'] ?? '/' ), 301 );
+		exit;
+	}
+}, 0 );
 
 add_action( 'template_redirect', function () {
 	$app = get_query_var( 'dvd_app' );

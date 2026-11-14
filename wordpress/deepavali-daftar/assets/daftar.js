@@ -1,6 +1,10 @@
 (function () {
   'use strict';
   var C = window.DVD || {};
+  // call the API on the same origin as the page (http vs https, www) so the browser never blocks it
+  function sameOrigin(u) { try { var x = new URL(u, location.href); return location.origin + x.pathname; } catch (e) { return u; } }
+  if (C.rest) C.rest = sameOrigin(C.rest);
+  if (C.dvbRest) C.dvbRest = sameOrigin(C.dvbRest);
   var app = document.getElementById('dd-app');
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function api(base, path, method, body) {
@@ -69,7 +73,7 @@
         done(j.dup);
       }).catch(function (x) {
         b.disabled = false; b.textContent = 'Hantar';
-        err.textContent = x.status ? x.message : 'Tiada sambungan internet. Sila cuba lagi.';
+        err.textContent = x.status ? x.message : 'Tiada sambungan internet. Sila cuba lagi. (' + (x.message || 'ralat') + ')';
         err.classList.remove('hidden');
       });
     });
