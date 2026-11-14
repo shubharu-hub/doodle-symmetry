@@ -60,11 +60,16 @@ function dvd_is_admin() {
 	if ( current_user_can( 'manage_options' ) ) {
 		return true;
 	}
-	return function_exists( 'dvb_is_admin' ) && dvb_is_admin();
+	// Not dvb_is_admin(): /bantuan/ was made fully public on 14 Nov 2026, this list stays private.
+	if ( function_exists( 'dvb_session_user' ) ) {
+		$u = dvb_session_user();
+		return $u && ! empty( $u['admin'] );
+	}
+	return false;
 }
 function dvd_who() {
-	if ( function_exists( 'dvb_me' ) ) {
-		return dvb_me();
+	if ( function_exists( 'dvb_session_user' ) && ( $u = dvb_session_user() ) ) {
+		return $u['name'];
 	}
 	return is_user_logged_in() ? wp_get_current_user()->display_name : '';
 }
